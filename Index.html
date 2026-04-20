@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1a73e8" />
+    <title>CreatorPDF Produção</title>
+
+    <link rel="manifest" href="manifest.json" />    
+    <link rel="icon" href="icons/icon-192.png" />
+    <link rel="stylesheet" href="style/style.css">
+
+    <!-- jsPDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="app-header-left">
+                <img src="img/logo.png" alt="Logo CreatorPDF" class="app-logo">
+                <div>
+                    <h1>Criador PDF Produção</h1>
+                    <p class="app-subtitle">Gestão de Eventos, Relatório PDF</p>
+                </div>
+            </div>
+        </header>
+
+        <section class="app-section">
+            <h2 class="section-title">Funcionalidades</h2>
+            <div class="section-header"></div>
+            <div>
+                <button onclick="selecionarDiretorio()" class="btn btn-primary">
+                    Selecione Evento<br/>(diretório)</button>
+
+                <button onclick="gerarPDF()" class="btn btn-Ok">
+                    Gerar PDF</button>
+
+                <button onclick="limparBase()" class="btn btn-warning">
+                    Limpar Base</button>
+            </div>
+        </section>
+
+        <section class="app-section">
+            <h2 class="section-title">Evento</h2>
+            <div class="section-header"></div>
+            <div id="eventoContainer" class="card-container"></div>
+        </section>
+        <section class="app-section">
+            <h2 class="section-title">Itens do Evento</h2>
+            <div class="section-header"></div>
+            <div id="itensContainer" class="card-container"></div>
+        </section>
+    </div>
+
+    <script>
+        let dirSelect = null;
+        async function selecionarDiretorio() {
+            try {
+                // Abre o seletor de diretório
+                dirSelect = await window.showDirectoryPicker();
+
+                // Procurar arquivos dentro do diretório
+                let arqEvento = null;
+                let arqItens = null;
+
+                for await (const entry of dirSelect.values()) {
+                    if (entry.kind === "file") {
+                        if (entry.name.toLowerCase() === "1-evento.csv") {
+                            arqEvento = entry;
+                        }
+                        if (entry.name.toLowerCase() === "2-itens.csv") {
+                            arqItens = entry;
+                        }
+                    }
+                }
+
+                if (!arqEvento || !arqItens) {
+                    alert("O diretório deve conter 1-Evento.csv e 2-Itens.csv");
+                    return;
+                }
+
+                // Ler EVENTO
+                const fileEvento = await arqEvento.getFile();
+                const textoEvento = await fileEvento.text();
+                processarCSVEvento(textoEvento);
+
+                // Ler ITENS
+                const fileItens = await arqItens.getFile();
+                const textoItens = await fileItens.text();
+                processarCSVItens(textoItens);
+
+                // Ok
+                alert("Arquivos carregados com sucesso!");
+
+            } catch (err) {
+                console.log("Erro ao selecionar diretório:", err);
+                alert("Não foi possível acessar o diretório.");
+            }
+        }
+
+        // -------------------------------
+        // Service Worker
+        // -------------------------------
+        if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("service-worker.js")
+                .then(() => console.log("Service Worker registrado"))
+                .catch(err => console.log("Erro ao registrar SW:", err));
+        }
+
+        //------------------------------
+        // Carregar logo PNG, uso no PDF
+        //------------------------------
+        function carregarLogo() {
+            const img = new Image();
+            img.src = "img/logo.png";
+            img.onload = function () {
+                const canvas = document.createElement("canvas");
+                canvas.width = img.width;
+                canvas.height = img.height;
+                const ctx = canvas.getContext("2d");
+                ctx.drawImage(img, 0, 0);
+                window.logoBase64 = canvas.toDataURL("image/png");
+            };
+        }
+
+        // -----------------------------
+        // IndexedDB - Criar/Abrir Banco
+        // -----------------------------
+        let db;
+        function iniciarDB() {
+            const request = indexedDB.open("CreatorPDF_DB", 1);
+
+            request.onupgradeneeded = function (event) {
+                db = event.target.result;
+
+                // Store do evento (apenas 1 registro)
+                if (!db.objectStoreNames.contains("evento")) {
+                    db.createObjectStore("evento", { keyPath: "id" });
+                }
+
+                if (!db.objectStoreNames.contains("itens")) {
+                    const store = db.createObjectStore("itens", { keyPath: "id" });
+                    store.createIndex("nome", "nome", { unique: false });
+                }
+            };
+
+            request.onsuccess = function (event) {
+                db = event.target.result;
+                carregarItensDoDB();
+            };
+
+            request.onerror = function () {
+                console.log("Erro ao abrir IndexedDB");
+            };
+        }
+
+        // ------------------------
+        // limpeza da base de dados
+        // ------------------------
+        function limparBase() {
+            if (!confirm("Tem certeza que deseja limpar base ?")) {
+                return;
+            }
+
+            const request = indexedDB.deleteDatabase("CreatorPDF_DB");
+
+            request.onsuccess = function () {
+                console.log("Banco apagado com sucesso");
+                alert("Base limpa com sucesso!");
+
+                // Limpar interface
+                document.getElementById("eventoContainer").innerHTML = "";
+                document.getElementById("itensContainer").innerHTML = "";
+
+                // Remover dados em memória
+                window.eventoAtual = null;
+
+                // Recriar o banco e re-renderizar a página
+                setTimeout(() => {
+                    iniciarDB();   // recria as stores
+                }, 300);
+            };
+            request.onerror = function () {
+                alert("Erro ao limpar a base.");
+            };
+            request.onblocked = function () {
+                alert("Feche outras abas do sistema antes de limpar a base.");
+            };
+        }
+
+
+
+        window.addEventListener("load", () => {
+            iniciarDB();
+            carregarLogo();
+        });
+
+
+
+        function salvarItemNoDB(item) {
+            const tx = db.transaction("itens", "readwrite");
+            const store = tx.objectStore("itens");
+            store.put(item);
+        }
+
+        function carregarItensDoDB() {
+            const tx = db.transaction("itens", "readonly");
+            const store = tx.objectStore("itens");
+
+            const request = store.getAll();
+            request.onsuccess = function () {
+                const itens = request.result;
+                if (itens.length > 0) {
+                    exibirItens(itens);
+                }
+            };
+        }
+
+
+        // -------------------------------
+        // Evento - CSV
+        // -------------------------------
+        document.getElementById("csvInput").addEventListener("change", function (event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                const text = e.target.result;
+                processarCSVEvento(text);
+            };
+            reader.readAsText(file);
+        });
+
+        function processarCSVEvento(csv) {
+            const linhas = csv.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+            const dados = linhas[1].split(",");
+
+            const evento = {
+                id: dados[0],
+                nome: dados[1],
+                data: dados[2],
+                horario: dados[3],
+                local: dados[4]
+            };
+
+            window.eventoAtual = evento;
+            exibirEvento(evento);
+            salvarEventoNoDB(evento);
+        }
+        function exibirEvento(evento) {
+            const container = document.getElementById("eventoContainer");
+            container.innerHTML = `
+                <div class="card card-evento">
+                    <p><strong>ID Evento:</strong> ${evento.id}</p>
+                    <p><strong>Nome Evento:</strong> ${evento.nome}</p>
+                    <p><strong>Data Evento:</strong> ${evento.data}</p>
+                    <p><strong>Horário:</strong> ${evento.horario}</p>
+                    <p><strong>Local:</strong> ${evento.local}</p>
+                </div>
+            `;
+        }
+        function salvarEventoNoDB(evento) {
+            const tx = db.transaction("evento", "readwrite");
+            const store = tx.objectStore("evento");
+            store.put(evento);
+        }
+        function carregarEventoDoDB() {
+            const tx = db.transaction("evento", "readonly");
+            const store = tx.objectStore("evento");
+
+            const request = store.getAll();
+            request.onsuccess = function () {
+                if (request.result.length > 0) {
+                    const evento = request.result[0];
+                    window.eventoAtual = evento;
+                    exibirEvento(evento);
+                }
+            };
+        }
+
+        // -------------------------------
+        // Logo para capa do PDF
+        // -------------------------------
+        document.getElementById("logoInput").addEventListener("change", function (event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                window.logoBase64 = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        // -------------------------------
+        // Itens - CSV
+        // -------------------------------
+        document.getElementById("csvItens").addEventListener("change", function (event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                const text = e.target.result;
+                processarCSVItens(text);
+            };
+            reader.readAsText(file);
+        });
+
+        function processarCSVItens(csv) {
+            const linhas = csv.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+            const dados = linhas.slice(1);
+
+            const itens = dados.map(linha => {
+                const col = linha.split(",");
+
+                return {
+                    id: crypto.randomUUID(),
+                    nome: col[0],
+                    acessorios: col[1],
+                    qtde: col[2],
+                    diarias: col[3],
+                    comentarios: col[4] || "",
+                    fotos: []
+                };
+            });
+
+            itens.forEach(item => salvarItemNoDB(item));
+            exibirItens(itens);
+        }
+
+        // -------------------------------
+        // Exibir Itens
+        // -------------------------------
+        function exibirItens(itens) {
+            const container = document.getElementById("itensContainer");
+            container.innerHTML = "";
+
+            itens.forEach(item => {
+                const fotosId = `fotos_${item.id}`;
+                const comentarioId = `coment_${item.id}`;
+
+                container.innerHTML += `
+                    <div class="card card-item">
+                        <p><strong>Nome do Item:</strong> ${item.nome}</p>
+                        <p><strong>Acessórios:</strong> ${item.acessorios}</p>
+                        <p><strong>Qtde.:</strong> ${item.qtde}</p>
+                        <p><strong>Diárias:</strong> ${item.diarias}</p>
+
+                        <label><strong>Comentários:</strong></label>
+                        <textarea id="${comentarioId}" rows="2" class="textarea">${item.comentarios}</textarea>
+
+                        <div class="card-actions">
+                            <button onclick="tirarFoto('${item.id}')" class="btn btn-primary">
+                                Tirar Foto
+                            </button>
+                        </div>
+
+                        <div id="${fotosId}" class="foto-container"></div>
+                    </div>
+                `;
+            });
+
+            // Comentários reativos
+            itens.forEach(item => {
+                const comentarioId = `coment_${item.id}`;
+                const campo = document.getElementById(comentarioId);
+                if (!campo) return;
+
+                campo.addEventListener("input", () => {
+                    item.comentarios = campo.value;
+                    salvarItemNoDB(item);
+                });
+            });
+
+            // Exibir fotos já salvas
+            itens.forEach(item => {
+                const fotosDiv = document.getElementById(`fotos_${item.id}`);
+                if (!fotosDiv || !item.fotos) return;
+
+                item.fotos.forEach(foto => {
+                    const img = document.createElement("img");
+                    img.src = foto;
+                    img.className = "foto-thumb";
+                    fotosDiv.appendChild(img);
+                });
+            });
+        }
+
+        // -------------------------------
+        // Tirar Foto
+        // -------------------------------
+        function tirarFoto(idItem) {
+            const input = document.createElement("input");
+            input.type = "file";
+            input.accept = "image/*;capture=camera";
+
+            input.onchange = function (event) {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = function (e) {
+                    const imgBase64 = e.target.result;
+
+                    const fotosDiv = document.getElementById(`fotos_${idItem}`);
+                    const img = document.createElement("img");
+                    img.src = imgBase64;
+                    img.className = "foto-thumb";
+                    fotosDiv.appendChild(img);
+
+                    salvarFotoNoItem(idItem, imgBase64);
+                };
+
+                reader.readAsDataURL(file);
+            };
+
+            input.click();
+        }
+
+        function salvarFotoNoItem(idItem, fotoBase64) {
+            const tx = db.transaction("itens", "readwrite");
+            const store = tx.objectStore("itens");
+
+            const request = store.get(idItem);
+            request.onsuccess = function () {
+                const item = request.result;
+                if (!item.fotos) item.fotos = [];
+                item.fotos.push(fotoBase64);
+                store.put(item);
+            };
+        }
+
+        // -------------------------------
+        // Carregar itens para PDF
+        // -------------------------------
+        function carregarItensParaPDF() {
+            return new Promise((resolve) => {
+                const tx = db.transaction("itens", "readonly");
+                const store = tx.objectStore("itens");
+
+                const request = store.getAll();
+                request.onsuccess = () => resolve(request.result);
+            });
+        }
+
+        // -------------------------------
+        // Gerar PDF com capa
+        // -------------------------------
+        async function gerarPDF() {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF("p", "pt", "a4");
+
+            const evento = window.eventoAtual || null;
+
+            // CAPA
+            doc.setFillColor(245, 245, 245);
+            doc.rect(0, 0, 595, 842, "F");
+
+            // LOGO À ESQUERDA
+            if (window.logoBase64) {
+                // posição X = 60, Y = 60
+                // tamanho 100x100 (ajustável)
+                doc.addImage(window.logoBase64, "PNG", 20, 20, 50, 30);
+            }
+            doc.setTextColor(30, 30, 30);
+
+            let xCol = 40;
+            let xRow = 120;
+
+            //Cabecalho
+            doc.setFontSize(30);
+            doc.text("Criador PDF Produção", xCol, xRow);
+            //
+            xRow += 20
+            doc.setFontSize(14);
+            doc.text("Gestão de Eventos, Relatório PDF", xCol, xRow);
+            //
+            xRow += 20
+            doc.line(xCol, xRow, 535, xRow);
+
+            //Dados do Evento
+            doc.setFontSize(12);
+            if (evento) {
+                xRow += 60
+                doc.text(`ID Evento: ${evento.id}  |  ${evento.nome}`, xCol, xRow);
+                //
+                xRow += 20
+                doc.text(`Data: ${evento.data}   |   Horário: ${evento.horario}`, xCol, xRow);
+                //
+                xRow += 20
+                doc.text(`Local: ${evento.local}`, xCol, xRow);
+            }
+            //
+            xRow += 20
+            doc.line(xCol, xRow, 535, xRow);
+
+            // ITENS
+            xRow += 60
+            const itens = await carregarItensParaPDF();
+            for (const item of itens) {
+                if (xRow > 750) {
+                    doc.addPage();
+                    xRow = 40;
+                }
+                xCol = 40;
+
+                doc.setFontSize(14);
+                doc.text(`${item.nome} - ${item.acessorios}`, xCol, xRow);
+                xRow += 15;
+
+                doc.setFontSize(10);
+                doc.text(`Quantidade: ${item.qtde}    |    Diárias: ${item.diarias}`, xCol, xRow);
+                xRow += 15;
+
+                doc.text(`Comentários: ${item.comentarios || ""}`, xCol, xRow);
+                xRow += 15;
+
+                if (item.fotos && item.fotos.length > 0) {
+                    doc.text("Fotos:", xCol, xRow);
+                    xRow += 10;
+
+                    for (const foto of item.fotos) {
+                        if (xCol > 535) {
+                            xCol = 40;
+                            xRow += 170
+                        }
+
+                        if (xRow > 750) {
+                            doc.addPage();
+                            xCol = 40;
+                            xRow = 60;
+                        }
+
+                        doc.addImage(foto, "JPEG", xCol, xRow, 160, 160);
+                        xCol += 170;
+                    }
+                }
+                xRow += 200;
+            }
+            // numeração de páginas
+            const totalPaginas = doc.getNumberOfPages();
+            for (let i = 1; i <= totalPaginas; i++) {
+                doc.setPage(i);
+                doc.setFontSize(8);
+                doc.text(`Página ${i} de ${totalPaginas}`, 535, 820, { align: "right" });
+            }
+            //
+            doc.save("CreatorPDF_Producao.pdf");
+        }
+    </script>
+</body>
+
+</html>
